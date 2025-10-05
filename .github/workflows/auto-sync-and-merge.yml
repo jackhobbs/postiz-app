@@ -75,9 +75,14 @@ jobs:
         if: steps.ff_attempt.outputs.status == 'ff'
         run: git push origin main
 
-      - name: Prepare PR from upstream head (no branch push)
+      - name: Create sync branch from upstream/main (when diverged)
         if: steps.ff_attempt.outputs.status == 'diverged'
-        run: echo "Opening PR using head gitroomhq:main; no fork branch push due to workflow file restrictions"
+        shell: bash
+        run: |
+          set -e
+          BR="sync/upstream-into-main/${{ github.run_id }}"
+          git checkout -B "$BR" upstream/main
+          git push -u origin "$BR" --force-with-lease
 
       - name: Open PR upstream -> main (when diverged)
         if: steps.ff_attempt.outputs.status == 'diverged'
@@ -86,28 +91,28 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            // Use upstream branch directly as PR head to avoid pushing branches that include workflow file changes
-            const head = 'gitroomhq:main';
+            // Use a branch in your fork created from upstream/main
+            const headBranch = `sync/upstream-into-main/${{ github.run_id }}`;
             const base = 'main';
             const title = 'Sync: upstream → main (review/resolve if conflicts)';
             const body = [
               'This PR brings upstream/main into your main.',
               '',
               '- Upstream is fetch-only; no pushes to upstream.',
-              '- The PR uses upstream/main as the head branch (no fork branch push).',
+              '- The PR uses a branch in your fork created from upstream/main.',
               '- If GitHub reports conflicts, resolve them in this PR UI.',
               '- After merging, your main will be updated to include upstream changes.',
-            ].join('\n');
+            ].join('\\n');
             try {
               // Avoid duplicate PRs with the same head/base
               const { data: prs } = await github.rest.pulls.list({
-                owner, repo, state: 'open', head: head, base
+                owner, repo, state: 'open', head: `${owner}:${headBranch}`, base
               });
               if (prs.length > 0) {
                 core.info(`Existing PR found: #${prs[0].number}`);
               } else {
                 const { data: pr } = await github.rest.pulls.create({
-                  owner, repo, title, head, base, body
+                  owner, repo, title, head: headBranch, base, body
                 });
                 core.info(`Created PR #${pr.number}`);
               }
