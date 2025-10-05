@@ -3,10 +3,15 @@ name: Safe: Sync Upstream -> main
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *"  # daily at 06:00 UTC (optional)
+    - cron: "0 6 * * *"
 
 permissions:
-  contents: write  # needed to push branches & create PRs
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
 
 jobs:
   sync-upstream-into-main:
@@ -22,64 +27,88 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Add upstream and fetch
-        run: |
-          # Safe upstream definition — change only if upstream repo is different
-          git remote add upstream https://github.com/gitroomhq/postiz-app.git || true
-          git fetch upstream --prune
-
-      - name: Ensure main branch
-        run: |
-          git checkout main
-
-      - name: Merge upstream/main into main (safe merge)
-        run: |
-          # prefer fast-forward, otherwise do a normal merge without editing commit message
-          git merge --ff-only upstream/main || git merge upstream/main --no-edit || true
-
-      - name: Push updated main (if changed)
-        run: |
-          git push origin main || echo "No changes to push for main"
-
-      - name: Prepare custom branch ameego-custom
-        run: |
-          git fetch origin
-          if git show-ref --verify --quiet refs/heads/ameego-custom; then
-            git checkout ameego-custom
-          else
-            # try to create from remote if exists, else create new branch locally
-            if git ls-remote --exit-code --heads origin ameego-custom; then
-              git checkout -b ameego-custom origin/ameego-custom
-            else
-              git checkout -b ameego-custom
-            fi
-          fi
-
-      - name: Try to merge main into ameego-custom
-        id: merge_attempt
+      - name: Set upstream remote and fetch
+        shell: bash
         run: |
           set -e
-          if git merge main --no-edit; then
-            echo "merge_status=success" >> $GITHUB_OUTPUT
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "https://github.com/gitroomhq/postiz-app.git"
           else
-            echo "merge_status=conflict" >> $GITHUB_OUTPUT
-            # create marker file to indicate conflict
-            echo "CONFLICT" > merge_conflict_marker.txt
+            git remote add upstream "https://github.com/gitroomhq/postiz-app.git"
+          fi
+          git fetch --prune upstream
+          git fetch --prune origin
+
+      - name: Align local main to origin/main
+        shell: bash
+        run: |
+          set -e
+          if git ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
+            git checkout -B main origin/main
+          else
+            git checkout -B main
           fi
 
-      - name: Push ameego-custom when merge succeeded
-        if: steps.merge_attempt.outputs.merge_status == 'success'
-        run: git push origin ameego-custom
+      - name: Try fast-forward merge upstream/main -> main
+        id: ff_attempt
+        shell: bash
+        run: |
+          set +e
+          if git ls-remote --exit-code --heads upstream main >/dev/null 2>&1; then
+            git merge --ff-only upstream/main
+            status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "status=ff" >> "$GITHUB_OUTPUT"
+            else
+              echo "status=diverged" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "status=no-upstream-main" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Create PR if merge failed (conflicts)
-        if: steps.merge_attempt.outputs.merge_status == 'conflict'
-        uses: peter-evans/create-pull-request@v5
+      - name: Push main when fast-forward succeeded
+        if: steps.ff_attempt.outputs.status == 'ff'
+        run: git push origin main
+
+      - name: Create sync branch from upstream/main (when diverged)
+        if: steps.ff_attempt.outputs.status == 'diverged'
+        shell: bash
+        run: |
+          set -e
+          BR="sync/upstream-into-main/${{ github.run_id }}"
+          git checkout -B "$BR" upstream/main
+          git push -u origin "$BR" --force-with-lease
+
+      - name: Open PR upstream -> main (when diverged)
+        if: steps.ff_attempt.outputs.status == 'diverged'
+        uses: actions/github-script@v7
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore: auto-sync main -> ameego-custom (conflicts)"
-          title: "Sync: Merge main → ameego-custom (please resolve conflicts)"
-          body: |
-            Automatic merge of `main` into `ameego-custom` failed due to conflicts.
-            This PR contains upstream changes that need manual resolution.
-          base: ameego-custom
-          head: main
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const head = `sync/upstream-into-main/${{ github.run_id }}`;
+            const base = 'main';
+            const title = 'Sync: upstream → main (review/resolve if conflicts)';
+            const body = [
+              'This PR brings upstream/main into your main.',
+              '',
+              '- Pushes are to origin only; upstream is fetch-only.',
+              '- If GitHub reports conflicts, resolve them in this PR UI.',
+              '- After merging, your main will be updated to include upstream changes.',
+            ].join('\n');
+            try {
+              // Check for existing open PR with same head/base to avoid duplicates
+              const { data: prs } = await github.rest.pulls.list({
+                owner, repo, state: 'open', head: `${owner}:${head}`, base
+              });
+              if (prs.length > 0) {
+                core.info(`Existing PR found: #${prs[0].number}`);
+              } else {
+                const { data: pr } = await github.rest.pulls.create({
+                  owner, repo, title, head, base, body
+                });
+                core.info(`Created PR #${pr.number}`);
+              }
+            } catch (e) {
+              core.setFailed(`Failed to create PR: ${e.message}`);
+            }
