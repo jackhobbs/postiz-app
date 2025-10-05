@@ -48,7 +48,7 @@ jobs:
           # Remove Authorization header injected by actions/checkout so our PAT is used
           git config --global --unset-all http.https://github.com/.extraheader || true
           
-      - name: Verify SYNC_TOKEN exists
+      - name: Verify SYNC_TOKEN exists and test auth
         shell: bash
         run: |
           if [ -z "${{ secrets.SYNC_TOKEN }}" ]; then
@@ -58,13 +58,24 @@ jobs:
           fi
           echo "SYNC_TOKEN is configured"
           
+          # Test authentication
+          curl -s -H "Authorization: token ${{ secrets.SYNC_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}" | jq -r '.permissions // "No permissions found"'
+          
       - name: Force PAT for all GitHub HTTPS operations
         shell: bash
         run: |
           set -e
+          # Clear all existing auth configs
           git config --global --unset-all http.https://github.com/.extraheader || true
+          git config --global --unset-all url."https://github.com/".insteadOf || true
+          
+          # Set up PAT authentication
           git config --global url."https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/".insteadOf "https://github.com/"
           git remote set-url origin "https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/${{ github.repository }}.git"
+          
+          # Verify remote URL
+          echo "Origin remote URL: $(git remote get-url origin | sed 's/x-access-token:[^@]*/x-access-token:***/')"
       - name: Align local main to origin/main
         shell: bash
         run: |
@@ -112,7 +123,7 @@ jobs:
           
           git push -u "https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/${{ github.repository }}.git" "$BR:$BR" --force-with-lease
 
-      - name: Open PR upstream -> main (when diverged)
+      - name: Open PR and auto-merge if no conflicts
         if: steps.ff_attempt.outputs.status == 'diverged'
         uses: actions/github-script@v7
         with:
@@ -120,31 +131,57 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            // Use a branch in your fork created from upstream/main
             const headBranch = `sync/upstream-into-main/${{ github.run_id }}`;
             const base = 'main';
-            const title = 'Sync: upstream → main (review/resolve if conflicts)';
+            const title = 'Sync: upstream → main (auto-merge if no conflicts)';
             const body = [
               'This PR brings upstream/main into your main.',
               '',
-              '- Upstream is fetch-only; no pushes to upstream.',
-              '- The PR uses a branch in your fork created from upstream/main.',
-              '- If GitHub reports conflicts, resolve them in this PR UI.',
-              '- After merging, your main will be updated to include upstream changes.',
+              '- Auto-created by sync workflow',
+              '- Will auto-merge if no conflicts detected',
+              '- Workflow files excluded to avoid GitHub restrictions',
             ].join('\\n');
+            
             try {
-              // Avoid duplicate PRs with the same head/base
+              // Check for existing PRs
               const { data: prs } = await github.rest.pulls.list({
                 owner, repo, state: 'open', head: `${owner}:${headBranch}`, base
               });
+              
+              let pr;
               if (prs.length > 0) {
-                core.info(`Existing PR found: #${prs[0].number}`);
+                pr = prs[0];
+                core.info(`Using existing PR #${pr.number}`);
               } else {
-                const { data: pr } = await github.rest.pulls.create({
+                const { data: newPr } = await github.rest.pulls.create({
                   owner, repo, title, head: headBranch, base, body
                 });
+                pr = newPr;
                 core.info(`Created PR #${pr.number}`);
               }
+              
+              // Wait a moment for GitHub to process the PR
+              await new Promise(resolve => setTimeout(resolve, 3000));
+              
+              // Check if PR is mergeable (no conflicts)
+              const { data: prDetails } = await github.rest.pulls.get({
+                owner, repo, pull_number: pr.number
+              });
+              
+              if (prDetails.mergeable === true) {
+                core.info('No conflicts detected, auto-merging...');
+                await github.rest.pulls.merge({
+                  owner, repo, pull_number: pr.number,
+                  merge_method: 'merge',
+                  commit_title: `Sync upstream changes (${headBranch})`
+                });
+                core.info(`Successfully auto-merged PR #${pr.number}`);
+              } else if (prDetails.mergeable === false) {
+                core.info(`PR #${pr.number} has conflicts - manual review required`);
+              } else {
+                core.info(`PR #${pr.number} mergeable status unknown - manual review recommended`);
+              }
+              
             } catch (e) {
-              core.setFailed(`Failed to create PR: ${e.message}`);
+              core.setFailed(`Failed to process PR: ${e.message}`);
             }
