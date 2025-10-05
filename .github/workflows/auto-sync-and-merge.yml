@@ -1,13 +1,13 @@
 name: Safe: Sync Upstream -> main -> ameego-custom
 
-# Only run on manual trigger or schedule
+# Run manually or on a schedule
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *"  # daily at 06:00 UTC (optional)
+    - cron: "0 6 * * *"  # daily at 06:00 UTC
 
 permissions:
-  contents: write  # needed to push branches & create PRs
+  contents: write
 
 jobs:
   sync-and-merge:
@@ -23,32 +23,29 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Add upstream and fetch
+      - name: Add upstream remote and fetch
         run: |
-          # Safe upstream definition — change only if upstream repo is different
           git remote add upstream https://github.com/gitroomhq/postiz-app.git || true
           git fetch upstream --prune
 
-      - name: Ensure main branch
-        run: |
-          git checkout main
+      - name: Checkout main
+        run: git checkout main
 
-      - name: Merge upstream/main into main (safe merge)
+      - name: Merge upstream/main into main
         run: |
-          # prefer fast-forward, otherwise do a normal merge without editing commit message
+          # prefer fast-forward; if not possible, do a normal merge without opening editor
           git merge --ff-only upstream/main || git merge upstream/main --no-edit || true
 
-      - name: Push updated main (if changed)
+      - name: Push main to origin (if changed)
         run: |
           git push origin main || echo "No changes to push for main"
 
-      - name: Prepare custom branch ameego-custom
+      - name: Ensure ameego-custom exists locally
         run: |
           git fetch origin
           if git show-ref --verify --quiet refs/heads/ameego-custom; then
             git checkout ameego-custom
           else
-            # try to create from remote if exists, else create new branch locally
             if git ls-remote --exit-code --heads origin ameego-custom; then
               git checkout -b ameego-custom origin/ameego-custom
             else
@@ -56,24 +53,24 @@ jobs:
             fi
           fi
 
-      - name: Try to merge main into ameego-custom
-        id: merge_attempt
+      - name: Try merge main into ameego-custom
+        id: try_merge
         run: |
           set -e
           if git merge main --no-edit; then
             echo "merge_status=success" >> $GITHUB_OUTPUT
           else
             echo "merge_status=conflict" >> $GITHUB_OUTPUT
-            # create marker file to indicate conflict
             echo "CONFLICT" > merge_conflict_marker.txt
           fi
 
-      - name: Push ameego-custom when merge succeeded
-        if: steps.merge_attempt.outputs.merge_status == 'success'
-        run: git push origin ameego-custom
+      - name: Push ameego-custom if merge succeeded
+        if: steps.try_merge.outputs.merge_status == 'success'
+        run: |
+          git push origin ameego-custom
 
-      - name: Create PR if merge failed (conflicts)
-        if: steps.merge_attempt.outputs.merge_status == 'conflict'
+      - name: Create PR if merge had conflicts
+        if: steps.try_merge.outputs.merge_status == 'conflict'
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -81,6 +78,6 @@ jobs:
           title: "Sync: Merge main → ameego-custom (please resolve conflicts)"
           body: |
             Automatic merge of `main` into `ameego-custom` failed due to conflicts.
-            This PR contains upstream changes that need manual resolution.
+            Please review and resolve conflicts in this Pull Request.
           base: ameego-custom
           head: main
