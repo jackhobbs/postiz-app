@@ -1,10 +1,7 @@
 name: Safe: Sync Upstream -> main -> ameego-custom
 
-# Run manually or on a schedule
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 6 * * *"  # daily at 06:00 UTC
 
 permissions:
   contents: write
@@ -33,14 +30,12 @@ jobs:
 
       - name: Merge upstream/main into main
         run: |
-          # prefer fast-forward; if not possible, do a normal merge without opening editor
           git merge --ff-only upstream/main || git merge upstream/main --no-edit || true
 
       - name: Push main to origin (if changed)
-        run: |
-          git push origin main || echo "No changes to push for main"
+        run: git push origin main || echo "No changes to push for main"
 
-      - name: Ensure ameego-custom exists locally
+      - name: Ensure ameego-custom exists
         run: |
           git fetch origin
           if git show-ref --verify --quiet refs/heads/ameego-custom; then
@@ -54,23 +49,21 @@ jobs:
           fi
 
       - name: Try merge main into ameego-custom
-        id: try_merge
+        id: merge_attempt
         run: |
           set -e
           if git merge main --no-edit; then
             echo "merge_status=success" >> $GITHUB_OUTPUT
           else
             echo "merge_status=conflict" >> $GITHUB_OUTPUT
-            echo "CONFLICT" > merge_conflict_marker.txt
           fi
 
-      - name: Push ameego-custom if merge succeeded
-        if: steps.try_merge.outputs.merge_status == 'success'
-        run: |
-          git push origin ameego-custom
+      - name: Push ameego-custom when merge succeeded
+        if: steps.merge_attempt.outputs.merge_status == 'success'
+        run: git push origin ameego-custom
 
-      - name: Create PR if merge had conflicts
-        if: steps.try_merge.outputs.merge_status == 'conflict'
+      - name: Create PR if merge failed (conflicts)
+        if: steps.merge_attempt.outputs.merge_status == 'conflict'
         uses: peter-evans/create-pull-request@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -78,6 +71,6 @@ jobs:
           title: "Sync: Merge main → ameego-custom (please resolve conflicts)"
           body: |
             Automatic merge of `main` into `ameego-custom` failed due to conflicts.
-            Please review and resolve conflicts in this Pull Request.
+            Please review and resolve conflicts in this PR.
           base: ameego-custom
           head: main
