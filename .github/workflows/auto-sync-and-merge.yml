@@ -1,4 +1,4 @@
-name: Safe: Sync Upstream -> main
+name: "Safe: Sync Upstream -> main"
 
 on:
   workflow_dispatch:
