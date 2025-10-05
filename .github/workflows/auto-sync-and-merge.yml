@@ -46,16 +46,13 @@ jobs:
           set -e
           # Remove Authorization header injected by actions/checkout so our PAT is used
           git config --global --unset-all http.https://github.com/.extraheader || true
-      - name: Configure origin with PAT for pushes
-        shell: bash
-        run: |
-          set -e
+          
       - name: Force PAT for all GitHub HTTPS operations
         shell: bash
         run: |
           set -e
-          git config --global url."https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/".insteadOf "https://github.com/"
-          git remote set-url origin "https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/${{ github.repository }}.git"
+          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
       - name: Align local main to origin/main
         shell: bash
         run: |
@@ -85,7 +82,7 @@ jobs:
 
       - name: Push main when fast-forward succeeded
         if: steps.ff_attempt.outputs.status == 'ff'
-        run: git push "https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
+        run: git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
 
       - name: Create sync branch from upstream/main (when diverged)
         if: steps.ff_attempt.outputs.status == 'diverged'
@@ -94,12 +91,13 @@ jobs:
           set -e
           BR="sync/upstream-into-main/${{ github.run_id }}"
           git checkout -B "$BR" upstream/main
-          git push -u "https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/${{ github.repository }}.git" "$BR:$BR" --force-with-lease
+          git push -u "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" "$BR:$BR" --force-with-lease
 
       - name: Open PR upstream -> main (when diverged)
         if: steps.ff_attempt.outputs.status == 'diverged'
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
