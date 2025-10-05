@@ -48,12 +48,23 @@ jobs:
           # Remove Authorization header injected by actions/checkout so our PAT is used
           git config --global --unset-all http.https://github.com/.extraheader || true
           
+      - name: Verify SYNC_TOKEN exists
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.SYNC_TOKEN }}" ]; then
+            echo "ERROR: SYNC_TOKEN secret is not set!"
+            echo "Please create a PAT with 'repo' and 'workflow' scopes and add it as SYNC_TOKEN secret"
+            exit 1
+          fi
+          echo "SYNC_TOKEN is configured"
+          
       - name: Force PAT for all GitHub HTTPS operations
         shell: bash
         run: |
           set -e
-          git config --global url."https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/".insteadOf "https://github.com/"
-          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git config --global --unset-all http.https://github.com/.extraheader || true
+          git config --global url."https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git remote set-url origin "https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/${{ github.repository }}.git"
       - name: Align local main to origin/main
         shell: bash
         run: |
@@ -83,7 +94,7 @@ jobs:
 
       - name: Push main when fast-forward succeeded
         if: steps.ff_attempt.outputs.status == 'ff'
-        run: git push "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
+        run: git push "https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:main
 
       - name: Create sync branch from upstream/main (when diverged)
         if: steps.ff_attempt.outputs.status == 'diverged'
@@ -92,13 +103,20 @@ jobs:
           set -e
           BR="sync/upstream-into-main/${{ github.run_id }}"
           git checkout -B "$BR" upstream/main
-          git push -u "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" "$BR:$BR" --force-with-lease
+          
+          # Remove workflow files that cause GitHub restrictions
+          if [ -d ".github/workflows" ]; then
+            git rm -rf .github/workflows/ || true
+            git commit -m "Remove workflow files to avoid GitHub restrictions" || true
+          fi
+          
+          git push -u "https://x-access-token:${{ secrets.SYNC_TOKEN }}@github.com/${{ github.repository }}.git" "$BR:$BR" --force-with-lease
 
       - name: Open PR upstream -> main (when diverged)
         if: steps.ff_attempt.outputs.status == 'diverged'
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.SYNC_TOKEN }}
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
